@@ -411,23 +411,16 @@
   </div>
 </div>
 
+<script src="/socket.io/socket.io.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script>
-  let running = true;
+  let running = false;
   let totalPkts = 0, encPkts = 0, noencPkts = 0;
-  let pktId = 1;
   let currentFilter = 'ALL';
   let packets = [];
   const MAX_ROWS = 20;
 
-  const PROTOCOLS = ['HTTPS', 'HTTPS', 'HTTPS', 'HTTPS', 'HTTP', 'DNS', 'SSH', 'TCP', 'HTTPS', 'HTTPS'];
-  const TLS_VER = ['TLS 1.3', 'TLS 1.2', 'TLS 1.3', null, 'TLS 1.3', 'TLS 1.2'];
-  const PORTS = { HTTPS: 443, HTTP: 80, DNS: 53, SSH: 22, TCP: 8080 };
-  const IP_POOL = ['192.168.1.', '10.0.0.', '172.16.0.', '203.150.'];
-  function randIP(pool) { return pool[Math.floor(Math.random() * pool.length)] + (Math.floor(Math.random() * 250) + 2); }
-  function randTLS(proto) { if (proto === 'HTTPS' || proto === 'SSH') return TLS_VER[Math.floor(Math.random() * 3)]; if (proto === 'HTTP') return null; return null; }
-
-  const lineLabels = Array.from({ length: 30 }, (_, i) => '');
+  const lineLabels = Array.from({ length: 30 }, () => '');
   const lineData = Array.from({ length: 30 }, () => 0);
 
   const lineCtx = document.getElementById('lineChart').getContext('2d');
@@ -469,7 +462,6 @@
   });
 
   const barCtx = document.getElementById('barChart').getContext('2d');
-  const protoCounts = { HTTPS: 0, HTTP: 0, DNS: 0, SSH: 0, TCP: 0 };
   const barChart = new Chart(barCtx, {
     type: 'bar',
     data: {
@@ -490,120 +482,142 @@
   function updateClock() {
     document.getElementById('clock').textContent = new Date().toLocaleTimeString('th-TH');
   }
-  setInterval(updateClock, 1000); updateClock();
-
-  const ALERT_TEMPLATES = [
-    { type: 'danger', msg: 'พบการสื่อสาร HTTP ที่ไม่เข้ารหัส (Port 80)' },
-    { type: 'warn', msg: 'พบ TLS 1.2 — แนะนำให้อัปเกรดเป็น TLS 1.3' },
-    { type: 'warn', msg: 'ปริมาณ traffic สูงกว่าปกติ' },
-    { type: 'danger', msg: 'พบ Port Scan จาก 10.0.0.45' },
-    { type: 'info', msg: 'Certificate ใกล้หมดอายุใน 14 วัน' },
-  ];
-  let alertIdx = 0;
-  let alertShown = [];
-
-  function addAlert() {
-    if (alertShown.length >= 3) alertShown.shift();
-    alertShown.push(ALERT_TEMPLATES[alertIdx % ALERT_TEMPLATES.length]);
-    alertIdx++;
-    const box = document.getElementById('alerts-box');
-    box.innerHTML = alertShown.map(a => `
-    <div class="alert-row alert-${a.type}" style="margin-bottom:6px;">
-      <span class="alert-icon">${a.type === 'danger' ? '✕' : a.type === 'warn' ? '△' : 'ℹ'}</span>
-      <div>${a.msg}</div>
-    </div>
-  `).join('');
-  }
+  setInterval(updateClock, 1000);
+  updateClock();
 
   function protoClass(p) {
     const m = { HTTPS: 'pill-https', HTTP: 'pill-http', DNS: 'pill-dns', SSH: 'pill-ssh', TCP: 'pill-tcp' };
     return m[p] || 'pill-tcp';
   }
 
-  function genPacket() {
-    const proto = PROTOCOLS[Math.floor(Math.random() * PROTOCOLS.length)];
-    const tls = randTLS(proto);
-    const enc = tls !== null;
-    const srcPool = IP_POOL[Math.floor(Math.random() * IP_POOL.length)];
-    const dstPool = IP_POOL[Math.floor(Math.random() * IP_POOL.length)];
-    return {
-      id: pktId++,
-      time: new Date().toLocaleTimeString('th-TH'),
-      src: randIP([srcPool]),
-      dst: randIP([dstPool]),
-      proto,
-      port: PORTS[proto] || (Math.floor(Math.random() * 10000) + 1024),
-      size: Math.floor(Math.random() * 1400) + 40,
-      tls: tls || '-',
-      enc
-    };
+  function setAlertsBox(message, variant = 'info') {
+    const box = document.getElementById('alerts-box');
+    box.innerHTML = `
+      <div class="alert-row alert-${variant}">
+        <span class="alert-icon">${variant === 'danger' ? '✕' : variant === 'warn' ? '△' : 'ℹ'}</span>
+        <div>${message}</div>
+      </div>
+    `;
+  }
+
+  function addAlert(alert) {
+    const box = document.getElementById('alerts-box');
+    const existing = box.querySelectorAll('.alert-row');
+    const wrapper = document.createElement('div');
+    wrapper.className = `alert-row alert-${alert.type}`;
+    wrapper.style.marginBottom = '6px';
+    wrapper.innerHTML = `
+      <span class="alert-icon">${alert.type === 'danger' ? '✕' : alert.type === 'warn' ? '△' : 'ℹ'}</span>
+      <div>${alert.message}</div>
+    `;
+
+    if (existing.length >= 3) {
+      existing[0].remove();
+    }
+    box.appendChild(wrapper);
   }
 
   function renderTable() {
     const tbody = document.getElementById('packet-table');
-    const filtered = currentFilter === 'ALL' ? packets : packets.filter(p => p.proto === currentFilter);
+    const filtered = currentFilter === 'ALL' ? packets : packets.filter(p => p.protocol === currentFilter);
     tbody.innerHTML = filtered.slice(0, MAX_ROWS).map(p => `
-    <tr>
-      <td>${p.id}</td>
-      <td>${p.time}</td>
-      <td>${p.src}</td>
-      <td>${p.dst}</td>
-      <td><span class="pill ${protoClass(p.proto)}">${p.proto}</span></td>
-      <td>${p.port}</td>
-      <td>${p.size}</td>
-      <td>${p.tls}</td>
-      <td><span class="pill ${p.enc ? 'pill-enc' : 'pill-noenc'}">${p.enc ? 'Encrypted' : 'Unencrypted'}</span></td>
-    </tr>
-  `).join('');
+      <tr>
+        <td>${p.id}</td>
+        <td>${p.time}</td>
+        <td>${p.srcIP}</td>
+        <td>${p.dstIP}</td>
+        <td><span class="pill ${protoClass(p.protocol)}">${p.protocol}</span></td>
+        <td>${p.dstPort || '-'}</td>
+        <td>${p.size}</td>
+        <td>${p.tlsVersion || '-'}</td>
+        <td><span class="pill ${p.encrypted ? 'pill-enc' : 'pill-noenc'}">${p.encrypted ? 'Encrypted' : 'Unencrypted'}</span></td>
+      </tr>
+    `).join('');
   }
 
-  let tickCount = 0;
-  function tick() {
-    if (!running) return;
-    const burst = Math.floor(Math.random() * 18) + 3;
-    let newPkts = [];
-    for (let i = 0; i < burst; i++) newPkts.push(genPacket());
+  function updateMetrics(stats) {
+    totalPkts = stats.total || 0;
+    encPkts = stats.encrypted || 0;
+    noencPkts = stats.unencrypted || 0;
 
-    let e = 0, n = 0;
-    newPkts.forEach(p => {
-      if (p.enc) e++; else n++;
-      protoCounts[p.proto] = (protoCounts[p.proto] || 0) + 1;
-    });
-    totalPkts += burst; encPkts += e; noencPkts += n;
-
-    packets = [...newPkts, ...packets].slice(0, 200);
-
-    document.getElementById('pps').textContent = burst;
+    document.getElementById('pps').textContent = stats.pps || 0;
     document.getElementById('total').textContent = totalPkts.toLocaleString();
-    const ep = totalPkts > 0 ? Math.round(encPkts / totalPkts * 100) : 0;
-    const np = 100 - ep;
-    document.getElementById('enc-pct').textContent = ep + '%';
-    document.getElementById('noenc-pct').textContent = np + '%';
+    document.getElementById('enc-pct').textContent = (stats.encryptedPct || 0) + '%';
+    document.getElementById('noenc-pct').textContent = (100 - (stats.encryptedPct || 0)) + '%';
     document.getElementById('enc-count').textContent = encPkts.toLocaleString() + ' แพ็กเก็ต';
     document.getElementById('noenc-count').textContent = noencPkts.toLocaleString() + ' แพ็กเก็ต';
+  }
 
-    lineData.push(burst); lineData.shift();
+  function updateCharts(stats) {
+    lineData.push(stats.pps || 0);
+    lineData.shift();
     lineChart.update('none');
 
     donutChart.data.datasets[0].data = [encPkts, noencPkts];
     donutChart.update('none');
 
-    barChart.data.datasets[0].data = ['HTTPS', 'HTTP', 'DNS', 'SSH', 'TCP'].map(k => protoCounts[k] || 0);
+    const protocolData = ['HTTPS', 'HTTP', 'DNS', 'SSH', 'TCP'].map(k => stats.protocols?.[k] || 0);
+    barChart.data.datasets[0].data = protocolData;
     barChart.update('none');
-
-    renderTable();
-    tickCount++;
-    if (tickCount % 8 === 0) addAlert();
   }
 
-  let interval = setInterval(tick, 800);
-  setTimeout(addAlert, 1200);
+  function handlePacket(pkt) {
+    if (!pkt) return;
+    packets = [pkt, ...packets].slice(0, 200);
+    renderTable();
+  }
+
+  const socket = io();
+
+  socket.on('connect', () => {
+    console.log('Socket connected:', socket.id);
+    socket.emit('capture:start', { iface: '5', filter: 'ip' });
+    setAlertsBox('เชื่อมต่อกับเซิร์ฟเวอร์สำเร็จ รอ packet จาก capture.js...', 'info');
+  });
+
+  socket.on('connected', (data) => {
+    console.log('Server connected event:', data);
+    if (typeof data.capturing === 'boolean') {
+      running = data.capturing;
+      document.querySelector('.btn-stop').textContent = running ? 'หยุดดักจับ' : 'เริ่มดักจับ';
+      document.querySelector('.badge-iface').textContent = data.interface || 'eth0';
+    }
+  });
+
+  socket.on('packet', (pkt) => {
+    handlePacket(pkt);
+  });
+
+  socket.on('stats', (stats) => {
+    updateMetrics(stats);
+    updateCharts(stats);
+  });
+
+  socket.on('alert', (alert) => {
+    addAlert(alert);
+  });
+
+  socket.on('capture:status', ({ capturing, interface: iface }) => {
+    running = capturing;
+    document.querySelector('.btn-stop').textContent = capturing ? 'หยุดดักจับ' : 'เริ่มดักจับ';
+    document.querySelector('.badge-iface').textContent = iface || 'eth0';
+    if (!capturing) {
+      setAlertsBox('ดักจับหยุดแล้ว', 'warn');
+    }
+  });
+
+  socket.on('disconnect', () => {
+    setAlertsBox('ตัดการเชื่อมต่อกับเซิร์ฟเวอร์แล้ว', 'danger');
+    running = false;
+    document.querySelector('.btn-stop').textContent = 'เริ่มดักจับ';
+  });
 
   function toggleCapture(btn) {
-    running = !running;
-    btn.textContent = running ? 'หยุดดักจับ' : 'เริ่มดักจับ';
-    if (running) interval = setInterval(tick, 800);
-    else clearInterval(interval);
+    if (running) {
+      socket.emit('capture:stop');
+    } else {
+      socket.emit('capture:start', { iface: '5', filter: 'ip' });
+    }
   }
 
   function setFilter(f, btn) {
@@ -612,4 +626,6 @@
     btn.classList.add('active');
     renderTable();
   }
+
+  setAlertsBox('กำลังเชื่อมต่อกับเซิร์ฟเวอร์...', 'info');
 </script>
